@@ -18,10 +18,10 @@
   // static file. The distro images are in R2 (_distros/), not in the assets.
   "assets": {
     "directory": "../.output/public",
-    "run_worker_first": ["/disks/*", "/distros/*"]
+    "run_worker_first": ["/disks/*", "/distros/*", "/wisp"]
   },
   // Served on its own domain (the verbi.st zone must be on this Cloudflare account); workers.dev keeps working.
-  "routes": [{ "pattern": "ssh.verbi.st", "custom_domain": true }],
+  "routes": [{ "pattern": "terminal.verbi.st", "custom_domain": true }],
   "durable_objects": { "bindings": [{ "name": "DISK", "class_name": "DiskDO" }] },
   "migrations": [{ "tag": "v1", "new_sqlite_classes": ["DiskDO"] }],
   // Browser origin allowed to call the API ("*" for any; the token still guards it).

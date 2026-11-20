@@ -12,6 +12,7 @@
 // one Durable Object per disk, so the compare-and-swap is serialized and the
 // lease clock is the server's.
 import { DurableObject } from "cloudflare:workers";
+import { connect } from "cloudflare:sockets";
 
 interface Env {
 	CHUNKS: R2Bucket;
@@ -153,12 +154,83 @@ async function accessOk(req: Request, env: Env): Promise<boolean> {
 	}
 }
 
+/**
+ * /wisp: a Wisp v1 proxy (https://github.com/MercuryWorkshop/wisp-protocol), the guest's network of the page:
+ * its TCP connections, multiplexed over one WebSocket, opened from here with cloudflare:sockets. It sits behind
+ * Access like everything else. Packets: [type u8][stream u32 LE][payload]; CONNECT 1 (type u8, port u16, host),
+ * DATA 2, CONTINUE 3 (u32 credit), CLOSE 4 (reason u8).
+ */
+const WISP_CREDIT = 128;
+function wisp(req: Request): Response {
+	if (req.headers.get("upgrade")?.toLowerCase() !== "websocket") return new Response("expected a WebSocket", { status: 426 });
+	const [client, server] = Object.values(new WebSocketPair()) as [WebSocket, WebSocket];
+	server.accept();
+	server.binaryType = "arraybuffer";
+	const send = (type: number, id: number, payload: Uint8Array = new Uint8Array(0)) => {
+		const p = new Uint8Array(5 + payload.length);
+		p[0] = type;
+		new DataView(p.buffer).setUint32(1, id, true);
+		p.set(payload, 5);
+		try { server.send(p); } catch { /* closed */ }
+	};
+	const u32 = (n: number) => { const b = new Uint8Array(4); new DataView(b.buffer).setUint32(0, n, true); return b; };
+	const streams = new Map<number, { writer: WritableStreamDefaultWriter<Uint8Array>; socket: Socket }>();
+	const close = (id: number, reason: number) => {
+		const s = streams.get(id);
+		if (!s) return;
+		streams.delete(id);
+		try { s.socket.close().catch(() => {}); } catch { /* already closed */ }
+		send(0x04, id, Uint8Array.of(reason));
+	};
+	send(0x03, 0, u32(WISP_CREDIT));
+	server.addEventListener("message", async (e) => {
+		if (!(e.data instanceof ArrayBuffer)) return;
+		const m = new Uint8Array(e.data);
+		if (m.length < 5) return;
+		const dv = new DataView(m.buffer);
+		const id = dv.getUint32(1, true);
+		if (m[0] === 0x01) {
+			if (m.length < 9 || m[5] !== 0x01 || streams.has(id)) { send(0x04, id, Uint8Array.of(0x41)); return; } // TCP only
+			const port = dv.getUint16(6, true), host = new TextDecoder().decode(m.subarray(8));
+			try {
+				const socket = connect({ hostname: host, port });
+				const writer = socket.writable.getWriter();
+				streams.set(id, { writer, socket });
+				void (async () => {
+					const reader = socket.readable.getReader();
+					try {
+						for (;;) {
+							const { done, value } = await reader.read();
+							if (done) break;
+							for (let o = 0; o < value.length; o += 16384) send(0x02, id, value.subarray(o, o + 16384));
+						}
+						close(id, 0x02);
+					} catch { close(id, 0x03); }
+				})();
+				void socket.closed.catch(() => close(id, 0x44));
+			} catch { send(0x04, id, Uint8Array.of(0x42)); }
+		} else if (m[0] === 0x02) {
+			const s = streams.get(id);
+			if (!s) return;
+			try { await s.writer.write(m.subarray(5)); send(0x03, id, u32(WISP_CREDIT)); } catch { close(id, 0x03); }
+		} else if (m[0] === 0x04) {
+			const s = streams.get(id);
+			if (s) { streams.delete(id); try { s.socket.close().catch(() => {}); } catch { /* */ } }
+		}
+	});
+	const done = () => { for (const [id] of [...streams]) close(id, 0x02); };
+	server.addEventListener("close", done);
+	server.addEventListener("error", done);
+	return new Response(null, { status: 101, webSocket: client });
+}
+
 export default {
 	async fetch(req: Request, env: Env): Promise<Response> {
 		const cors = corsHeaders(env);
 		const reply = (status: number, body?: BodyInit | null, headers: Record<string, string> = {}) => new Response(body ?? null, { status, headers: { ...cors, ...headers } });
 		if (env.ACCESS_TEAM && env.ACCESS_AUD && !(await accessOk(req, env))) return reply(403, "forbidden: sign in through Cloudflare Access");
 		if (req.method === "OPTIONS") return reply(204);
+		if (new URL(req.url).pathname === "/wisp") return wisp(req);
 		// The page's images are public (like its other files); the token guards the disks only.
 		const dm = /^\/distros\/([^/]+)$/.exec(new URL(req.url).pathname);
 		if (dm) return serveDistro(req, env, dm[1]!);

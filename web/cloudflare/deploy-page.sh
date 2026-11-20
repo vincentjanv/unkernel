@@ -9,7 +9,7 @@ bucket="${BUCKET:-unkernel-disks}"
 
 cd "$web"
 [ -d node_modules ] || npm install
-VITE_KW_REMOTE="${VITE_KW_REMOTE:-/disks/home}" NITRO_PRESET=static npx vite build
+VITE_KW_REMOTE="${VITE_KW_REMOTE:-/disks/home}" VITE_KW_WISP="${VITE_KW_WISP:-/wisp}" NITRO_PRESET=static npx vite build
 out="$web/.output/public"
 
 # Static assets: the isolation headers, and leave out what must not be uploaded as assets:

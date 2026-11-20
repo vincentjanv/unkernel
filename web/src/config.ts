@@ -272,7 +272,13 @@ export function readConfig(search: string = location.search, saved: Record<strin
 	const append = params.get("append");
 	const root = params.get("root") === "initramfs" ? "initramfs" : null;
 	const wispParam = params.get("wisp");
-	const wisp = wispParam && wispParam !== "0" ? wispParam.split(",").map((s) => s.trim()).filter(Boolean) : null;
+	let wisp = wispParam && wispParam !== "0" ? wispParam.split(",").map((s) => s.trim()).filter(Boolean) : null;
+	const wispDefault = import.meta.env?.VITE_KW_WISP; // this deployment's own proxy (web/cloudflare), unless ?wisp= says otherwise
+	if (!wisp && wispParam === null && wispDefault) {
+		const u = new URL(wispDefault, location.href);
+		u.protocol = u.protocol === "https:" ? "wss:" : u.protocol === "http:" ? "ws:" : u.protocol;
+		wisp = [u.href];
+	}
 	// Worker mode by default where shared memory works (input and frames then
 	// skip the worker's message queue); a default worker that failed to start
 	// falls back to the page's thread for one load (boot.ts bootUpOnce()).

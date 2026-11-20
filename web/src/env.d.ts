@@ -27,6 +27,8 @@ declare module "virtual:unkernel-kernel" {
 /** Vite env (web/.env.local): the disk endpoint the data disk is synced to by default (see web/src/data.ts readRemote()). */
 interface ImportMetaEnv {
 	readonly VITE_KW_REMOTE?: string;
+	/** Default Wisp proxy (a relative path becomes ws(s)://<this host><path>). */
+	readonly VITE_KW_WISP?: string;
 }
 interface ImportMeta {
 	readonly env: ImportMetaEnv;
