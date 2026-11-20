@@ -22,6 +22,8 @@ import { webPlatform } from "./web/platform.ts";
 export * from "./core/index.ts";
 export { DATA_DISK_NAME, DATA_DISK_VERSION, IdbStore, dataDiskStore, importDataDisk, openDataDisk, openDistroDisk, openHttpDisk, resetDataDisk, resetHttpDisk } from "./web/disk.ts";
 export type { DataDiskNameOptions, HttpDiskOptions, IdbStoreOptions, OpenDataDiskOptions } from "./web/disk.ts";
+export { HttpBackend, IdbChunkCache, IdbSyncState, MemBackend, MemChunkCache, MemSyncState, RemoteConflictError, RemoteLeaseError, RemoteStore } from "./web/remote-disk.ts";
+export type { ChunkCache, HttpBackendOptions, Manifest, RemoteBackend, RemoteStatus, RemoteStoreOptions } from "./web/remote-disk.ts";
 export { DEFAULT_MEMORY_FALLBACK_MIB, autoMemoryMiB, isMobile } from "./web/memory.ts";
 export { webCpuBlocker } from "./web/cpu.ts";
 export { serveWasiPrograms } from "./web/wasi.ts";

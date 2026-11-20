@@ -6,6 +6,7 @@
 import { BaseDisk, CowDisk, HttpBase, SparseBase, ZeroBase, type OverlayStore, type StoreIndex } from "../core/block.ts";
 import { DistroDisk } from "../core/distro.ts";
 import { decodeKwsparse, gunzipIfNeeded, type KwsparseImage } from "../core/kwsparse.ts";
+import { HttpBackend, IdbChunkCache, IdbSyncState, RemoteStore, type RemoteBackend, type RemoteStoreOptions } from "./remote-disk.ts";
 
 const BLOCK = 4096;
 
@@ -339,6 +340,14 @@ export interface OpenDataDiskOptions extends DataDiskNameOptions {
 	/** Default 64 MiB. */
 	snapshotLimit?: number;
 	onError?: (err: unknown) => void;
+	/**
+	 * Mirror the persistent disk to a server (see remote-disk.ts), so it opens
+	 * in any browser: the REST endpoint of this disk (and a token), or a
+	 * RemoteBackend of your own. Throws RemoteLeaseError if another browser
+	 * has the disk open, RemoteConflictError if this one has unsynced changes
+	 * against a newer remote disk. Applies to mode "persistent" only.
+	 */
+	remote?: { url: string; token?: string; backend?: undefined; options?: RemoteStoreOptions } | { backend: RemoteBackend; url?: undefined; token?: undefined; options?: RemoteStoreOptions };
 }
 
 /**
@@ -348,20 +357,25 @@ export interface OpenDataDiskOptions extends DataDiskNameOptions {
  * page runs a snapshot of the template and says why).
  */
 export async function openDataDisk({ name = DATA_DISK_NAME, version = DATA_DISK_VERSION, template, mode = "persistent",
-	snapshotLimit = 64 * 1048576, log = (m) => console.warn(m), onError }: OpenDataDiskOptions): Promise<CowDisk> {
+	snapshotLimit = 64 * 1048576, log = (m) => console.warn(m), onError, remote }: OpenDataDiskOptions): Promise<CowDisk> {
 	const tpl = "indices" in template ? template : decodeKwsparse(await gunzipIfNeeded(template));
 	if (tpl.blockSize !== BLOCK) throw new Error(`data disk template: block size ${tpl.blockSize}, need ${BLOCK}`);
 	const haveIdb = typeof indexedDB !== "undefined";
-	const { store, identity } = dataDiskStore(tpl.size, { name, version, log });
+	const { store: idb, identity } = dataDiskStore(tpl.size, { name, version, log });
+	let store: IdbStore | RemoteStore = idb;
+	if (remote && mode === "persistent" && haveIdb) {
+		const backend = remote.backend ?? new HttpBackend({ url: remote.url, token: remote.token });
+		store = new RemoteStore(idb, backend, new IdbSyncState(`${name}-${version}`), { log, cache: new IdbChunkCache(`${name}-${version}`), ...remote.options });
+	}
 
 	if (mode !== "persistent" || !haveIdb) {
 		let base = SparseBase.fromKwsparse(tpl), from = "the template";
 		if (haveIdb) {
 			try {
-				const st = await store.open(identity, { onMismatch: "refuse", write: false });
+				const st = await idb.open(identity, { onMismatch: "refuse", write: false });
 				if (st.initialized && st.mismatch === undefined) {
 					if (snapshotLimit > 0 && st.keys.size * BLOCK <= snapshotLimit) {
-						base = new SparseBase(tpl.size, await store.readAll());
+						base = new SparseBase(tpl.size, await idb.readAll());
 						from = "a copy of the saved disk";
 					} else {
 						from = `the template (the saved disk, ${(st.keys.size * BLOCK / 1048576).toFixed(0)} MiB, is too large to copy)`;
@@ -370,7 +384,7 @@ export async function openDataDisk({ name = DATA_DISK_NAME, version = DATA_DISK_
 			} catch (e) {
 				log(`[host] data disk: cannot read the saved disk for a snapshot: ${(e as Error)?.message ?? e}`);
 			} finally {
-				await store.close();
+				await idb.close();
 			}
 		}
 		const d = new CowDisk(base, { log });

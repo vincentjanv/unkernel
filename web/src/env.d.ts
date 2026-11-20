@@ -23,3 +23,11 @@ declare module "virtual:unkernel-kernel" {
 	export const kernelSmpUrl: URL | null;
 	export const distros: { name: string; url: string; size: number; imageId?: string }[];
 }
+
+/** Vite env (web/.env.local): the disk endpoint the data disk is synced to by default (see web/src/data.ts readRemote()). */
+interface ImportMetaEnv {
+	readonly VITE_KW_REMOTE?: string;
+}
+interface ImportMeta {
+	readonly env: ImportMetaEnv;
+}

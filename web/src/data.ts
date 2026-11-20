@@ -5,7 +5,7 @@
 // module owns the browser side: the template, the one-tab-at-a-time lock,
 // storage persistence and quota, and export, import and reset. boot.ts
 // calls attachDataDisk() and wires the rest to KW.*.
-import { DATA_DISK_NAME, gzipBlob, importDataDisk, openDataDisk, resetDataDisk, type CowDisk } from "./sdk.ts";
+import { DATA_DISK_NAME, RemoteConflictError, RemoteLeaseError, RemoteStore, gzipBlob, importDataDisk, openDataDisk, resetDataDisk, type CowDisk, type RemoteStatus } from "./sdk.ts";
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -85,6 +85,60 @@ export async function storageState({ ask = false }: { ask?: boolean } = {}): Pro
 	return out;
 }
 
+export interface RemoteConfig {
+	url: string;
+	token?: string;
+	/** This browser's stable lease owner id: after a reload the browser takes its own lease back at once. */
+	owner: string;
+}
+
+const REMOTE_KEY = "kwremote";
+const OWNER_KEY = "kwremote-owner";
+
+const randomOwner = () => Array.from(crypto.getRandomValues(new Uint8Array(8)), (b) => b.toString(16).padStart(2, "0")).join("");
+
+function browserOwner(): string {
+	try {
+		let o = localStorage.getItem(OWNER_KEY);
+		if (!o || !/^[0-9a-f]{16}$/.test(o)) localStorage.setItem(OWNER_KEY, (o = randomOwner()));
+		return o;
+	} catch {
+		return randomOwner();
+	}
+}
+
+/**
+ * Where this browser syncs the data disk to: the build's default
+ * (VITE_KW_REMOTE, e.g. in web/.env.local; a relative URL is resolved against
+ * the page), or one chosen per browser with ?remote=<url of the disk>&token=<token>
+ * (saved in localStorage, then taken out of the address bar so the token does not
+ * stay in the history). ?remote=0 turns it off in this browser, ?remote=default
+ * goes back to the build's default. <url> is the disk's endpoint, e.g.
+ * https://unkernel-disks.<you>.workers.dev/disks/home.
+ */
+export function readRemote(): RemoteConfig | null {
+	try {
+		const u = new URL(location.href), p = u.searchParams;
+		if (p.has("remote")) {
+			const v = p.get("remote") ?? "";
+			if (v === "" || v === "default") localStorage.removeItem(REMOTE_KEY);
+			else if (v === "0" || v === "off") localStorage.setItem(REMOTE_KEY, JSON.stringify({ off: true }));
+			else localStorage.setItem(REMOTE_KEY, JSON.stringify({ url: v, token: p.get("token") ?? undefined }));
+			p.delete("remote");
+			p.delete("token");
+			history.replaceState(null, "", u);
+		}
+		const raw = localStorage.getItem(REMOTE_KEY);
+		const saved = raw ? (JSON.parse(raw) as { url?: string; token?: string; off?: boolean }) : null;
+		if (saved?.off) return null;
+		const url = typeof saved?.url === "string" ? saved.url : (import.meta.env.VITE_KW_REMOTE ?? "");
+		if (!url) return null;
+		return { url: new URL(url, location.href).href, token: saved?.token, owner: browserOwner() };
+	} catch {
+		return null;
+	}
+}
+
 export interface DataAttach {
 	/** null: no data disk (reason says why). */
 	disk: CowDisk | null;
@@ -94,14 +148,17 @@ export interface DataAttach {
 	reason?: string;
 	/** Where the template came from. */
 	from?: string;
+	/** The disk is synced to a server: its store (status, syncNow()). */
+	remote?: RemoteStore;
 }
 
 /** Open the data disk for this page. */
-export async function attachDataDisk({ enabled, bundled, log, onError }: {
+export async function attachDataDisk({ enabled, bundled, log, onError, onRemoteStatus }: {
 	enabled: boolean;
 	bundled: Uint8Array | undefined;
 	log: (m: string) => void;
 	onError: (e: unknown) => void;
+	onRemoteStatus?: (s: RemoteStatus) => void;
 }): Promise<DataAttach> {
 	if (!enabled) return { disk: null, lock: null, reason: "off (?data=0)" };
 	if (typeof indexedDB === "undefined") return { disk: null, lock: null, reason: "no IndexedDB in this browser" };
@@ -112,18 +169,42 @@ export async function attachDataDisk({ enabled, bundled, log, onError }: {
 		const disk = await openDataDisk({ template: tpl.bytes, mode: "snapshot", log });
 		return { disk, lock, from: tpl.from, notice: `open in another tab: this tab's /data is ${disk.notice} (changes are not saved)` };
 	}
+	const rc = readRemote();
 	try {
-		const disk = await openDataDisk({ template: tpl.bytes, log, onError });
-		return { disk, lock, from: tpl.from };
+		const disk = await openDataDisk({
+			template: tpl.bytes, log, onError,
+			remote: rc ? { url: rc.url, token: rc.token, options: { log, owner: rc.owner, onStatus: (s) => {
+				log(`[remote] ${s.state}, revision ${s.rev}, ${s.dirtyBlocks} unsynced blocks${s.error ? `: ${s.error}` : ""}`);
+				onRemoteStatus?.(s);
+			} } } : undefined,
+		});
+		const remote = disk.store instanceof RemoteStore ? disk.store : undefined;
+		if (remote) watchPage(remote);
+		return { disk, lock, from: tpl.from, remote };
 	} catch (e) {
 		// A saved disk of another format, or IndexedDB refusing (private
 		// browsing, disabled storage): run on a copy of the template.
 		const err = e as Error;
 		log(`[host] data disk: not attached persistently: ${err.name}: ${err.message}`);
 		const disk = await openDataDisk({ template: tpl.bytes, mode: "snapshot", log, snapshotLimit: 0 });
-		const why = err.name === "DataDiskFormatError" ? err.message : `IndexedDB failed (${err.name}: ${err.message})`;
+		const why = err.name === "DataDiskFormatError" ? err.message
+			: err instanceof RemoteLeaseError || err instanceof RemoteConflictError ? err.message
+			: rc ? `the remote disk failed (${err.name}: ${err.message})` : `IndexedDB failed (${err.name}: ${err.message})`;
 		return { disk, lock, from: tpl.from, notice: `${why}; this tab's /data is a fresh disk in memory (changes are not saved)` };
 	}
+}
+
+let watching: RemoteStore | null = null;
+
+/** Push when the page is hidden (the best moment before a tab is frozen or closed), and give the lease back when it goes away with nothing unpushed. */
+function watchPage(rs: RemoteStore): void {
+	void rs.prefetch();
+	if (watching) return;
+	watching = rs;
+	document.addEventListener("visibilitychange", () => {
+		if (document.visibilityState === "hidden") rs.syncNow().catch(() => {});
+	});
+	addEventListener("pagehide", () => { rs.releaseIfClean(); });
 }
 
 /** Download the disk's current content as a .kwsparse.gz file. */

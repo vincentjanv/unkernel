@@ -22,7 +22,7 @@ import { WTerm } from "@wterm/dom";
 import { prefetchApkIndexes } from "./apk.ts";
 import { createAudioOut } from "./audio.ts";
 import { INLINE_ONCE_KEY, REPO, UP_ONCE_KEY } from "./config.ts";
-import { attachDataDisk, detachDataDisk, downloadKwsparse, exportDataDisk, fmtSize, importDataDisk, resetDataDisk, storageState, acquireDiskLock, type DataAttach } from "./data.ts";
+import { readRemote, attachDataDisk, detachDataDisk, downloadKwsparse, exportDataDisk, fmtSize, importDataDisk, resetDataDisk, storageState, acquireDiskLock, type DataAttach } from "./data.ts";
 import { createDisplayUi } from "./display.ts";
 import { KW } from "./kw.ts";
 import { showcaseFromUrl } from "./launcher.ts";
@@ -232,7 +232,8 @@ export function start(): void {
 		else {
 			const lock = await acquireDiskLock();
 			data = { disk: null, lock, from: "bundled in the kernel" };
-			return [{ kind: "data", template: "bundled", mode: lock.held ? "persistent" : "snapshot", optional: true }];
+			const rc = readRemote();
+			return [{ kind: "data", template: "bundled", mode: lock.held ? "persistent" : "snapshot", optional: true, ...(rc ? { remote: { url: rc.url, token: rc.token, owner: rc.owner } } : {}) }];
 		}
 		KW.dataDisk = null;
 		showData(null, 0);

@@ -76,6 +76,12 @@ export interface DataDiskSpec extends SpecCommon {
 	name?: string;
 	version?: string;
 	snapshotLimit?: number;
+	/**
+	 * Mirror the disk to a server (js/web/remote-disk.ts): the disk's REST
+	 * endpoint, an optional bearer token, and this browser's stable owner id
+	 * (the writer lease is kept per owner, so a reload takes its own back).
+	 */
+	remote?: { url: string; token?: string; owner?: string };
 }
 
 export type DiskSpec = FileDiskSpec | HttpDiskSpec | DataDiskSpec;

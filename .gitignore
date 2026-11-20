@@ -9,3 +9,4 @@ web/.vercel/
 web/kernel/
 web/public/distros/
 tmp/
+web/cloudflare/.uploaded-distros

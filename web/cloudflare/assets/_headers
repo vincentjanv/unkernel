@@ -1,0 +1,8 @@
+# Cloudflare static assets headers (copied into the build by deploy-page.sh).
+# The page is cross-origin isolated, like web/vite.config.ts routeRules.
+/*
+  Cross-Origin-Opener-Policy: same-origin
+  Cross-Origin-Embedder-Policy: require-corp
+# Checked for updates on every load (src/sw.ts).
+/vm-sw.js
+  Cache-Control: no-cache
